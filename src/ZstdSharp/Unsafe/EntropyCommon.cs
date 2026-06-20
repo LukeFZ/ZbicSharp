@@ -37,6 +37,160 @@ namespace ZstdSharp.Unsafe
          *  FSE NCount encoding-decoding
          ****************************************************************/
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static nuint FSE_readNCount_bic(short* normalizedCounter, uint* maxSVPtr, uint* tableLogPtr,
+                           void* headerBuffer, nuint hbSize)
+        {    
+            uint* bicCounter = stackalloc uint[257];
+            if (hbSize == 0) 
+                return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+
+            byte* ip = (byte*) headerBuffer;
+            uint bitStream = *ip;
+            nuint rawDataSize = bitStream & 0x7F;     /* Bitstream encodes the segment's raw data size in the first 7 bits. */
+            uint useLowProbCount = bitStream >> 7;
+
+            if (rawDataSize >= hbSize) 
+                return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+
+            nuint dataSize = rawDataSize + 1;
+            if (dataSize >= hbSize) 
+                return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+
+            ulong i, l, j, k;
+            
+            for (i = 0; rawDataSize != 0; i = *(ip + rawDataSize--) | (i << 8)) {
+                if (((i >> 32) & 0xFFFFFFFF) >= 0x100) 
+                    break;
+            }
+            
+            ulong encodedCharTable = i / 0x34;  
+            for (j = i % 0x34; rawDataSize != 0; encodedCharTable = * (ip + rawDataSize--) | (encodedCharTable << 8)) {
+                if (((encodedCharTable >> 32) & 0xFFFFFFFF) >= 0x100) 
+                    break;
+            }
+
+            uint charNum = (uint)(j + 1);
+            if (charNum > *maxSVPtr) 
+                return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+
+            ulong charTable = encodedCharTable >> 3;
+            for (k = encodedCharTable & 0x7; rawDataSize != 0; charTable = *(ip + rawDataSize--) | (charTable << 8))
+            {
+                if (((charTable >> 32) & 0xFFFFFFFF) >= 0x100) 
+                    break;
+            }
+
+            int tableLog = (int)(k + 5);
+            uint remaining = 1u << tableLog;
+            for (l = charTable / remaining; rawDataSize != 0; l = *(ip + rawDataSize--) | (l << 8))
+            {
+                if (((l >> 32) & 0xFFFFFFFF) >= 0x100) 
+                    break;
+            }
+
+            /* Find the last entry of the symbol occurrence table. */
+            ulong charLast = charTable % remaining + 1;
+            if (useLowProbCount != 0) 
+                charLast = charNum + charTable % remaining + 2;
+
+            /* Strictly calculate the next power of 2. */
+            uint charNumNextPow2 = charNum;
+            charNumNextPow2 |= (charNumNextPow2 >> 1);
+            charNumNextPow2 |= (charNumNextPow2 >> 2);
+            charNumNextPow2 |= (charNumNextPow2 >> 4);
+            charNumNextPow2 |= (charNumNextPow2 >> 8);
+            charNumNextPow2 |= (charNumNextPow2 >> 16);
+            charNumNextPow2++;
+
+            if (charNumNextPow2 > 0xFF) return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+            bicCounter[charNumNextPow2] = (uint)charLast;
+
+            /* Perform interpolative decoding (cumulative).
+             * l encodes the symbol occurrence table as an ulong.
+             */
+            uint bicCount = 0;
+            if (charNumNextPow2 != 0xFF)
+            {
+                do
+                {
+                    ulong bicTableOffset = 3 * (bicCount - charNumNextPow2 + 0x100);
+                    uint btMiddleIndex = BIC_table[bicTableOffset + 0];
+                    uint btFirstIndex = BIC_table[bicTableOffset + 1];
+                    uint btLastIndex = BIC_table[bicTableOffset + 2];
+                    uint bcFirstIndexEntry = bicCounter[btFirstIndex];
+                    uint bcLastIndexEntry = bicCounter[btLastIndex];
+
+                    if (bcFirstIndexEntry == bcLastIndexEntry)
+                    {
+                        /* Indices are the same.
+                         * Update our counter array with the entry at the first index
+                         * for the length of the sequence imin+1 to imax-1.
+                        */
+                        uint bicCounterIndex = btFirstIndex + 1;
+                        if (bicCounterIndex < btLastIndex)
+                        {
+                            uint btIndexDist = btLastIndex - bicCounterIndex;
+                            while (btIndexDist > 0)
+                            {
+                                bicCounter[bicCounterIndex++] = bcFirstIndexEntry;
+                                --btIndexDist;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        /* Do recursive interpolative decoding.
+                         * l is updated by l div (lastIndexEntry - firstIndexEntry + 1).
+                         * The entry at the middle index is decoded by l mod (lastIndexEntry - firstIndexEntry + 1) + firstIndexEntry.
+                        */
+                        ulong lNext = l / (bcLastIndexEntry - bcFirstIndexEntry + 1);
+                        ulong lEntry = l % (bcLastIndexEntry - bcFirstIndexEntry + 1);
+                        for (l = lNext; rawDataSize != 0; l = *(ip + rawDataSize--) | (l << 8))
+                        {
+                            if (((l >> 32) & 0xFFFFFFFF) >= 0x100) break;
+                        }
+                        bicCounter[btMiddleIndex] = (uint)(lEntry + bcFirstIndexEntry);
+                    }
+
+                    ++bicCount;
+                } while (bicCount < charNumNextPow2);
+            }
+
+            if (charNum != 0xFF)
+            {
+                int accCount = 0;
+                uint* bc = &bicCounter[1];
+                uint charNumLeft = charNum + 1;
+                do
+                {
+                    short bcCount = *(short*)bc++;
+                    short countDist = (short)(bcCount - accCount);
+                    short count = (short)(countDist - useLowProbCount);
+                    accCount += countDist;
+                    *normalizedCounter++ = count;
+
+                    int weightedCount = count;
+                    if (count < 0) 
+                        weightedCount = -count;
+
+                    remaining -= (uint)weightedCount;
+                    --charNumLeft;
+                } while (charNumLeft != 0);
+            }
+
+            if (remaining != 0) 
+                return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+
+            *maxSVPtr = charNum;
+            *tableLogPtr = (uint)tableLog;
+
+            if (rawDataSize != 0) 
+                return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
+
+            return dataSize;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static nuint FSE_readNCount_body(short* normalizedCounter, uint* maxSVPtr, uint* tableLogPtr, void* headerBuffer, nuint hbSize)
         {
             byte* istart = (byte*)headerBuffer;
@@ -200,7 +354,8 @@ namespace ZstdSharp.Unsafe
         /* Avoids the FORCE_INLINE of the _body() function. */
         private static nuint FSE_readNCount_body_default(short* normalizedCounter, uint* maxSVPtr, uint* tableLogPtr, void* headerBuffer, nuint hbSize)
         {
-            return FSE_readNCount_body(normalizedCounter, maxSVPtr, tableLogPtr, headerBuffer, hbSize);
+            // ZBIC Change: use BIC method here
+            return FSE_readNCount_bic(normalizedCounter, maxSVPtr, tableLogPtr, headerBuffer, hbSize);
         }
 
         /*! FSE_readNCount_bmi2():

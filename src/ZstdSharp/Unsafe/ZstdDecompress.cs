@@ -330,7 +330,7 @@ namespace ZstdSharp.Unsafe
                 return 0;
             {
                 uint magic = MEM_readLE32(buffer);
-                if (magic == 0xFD2FB528)
+                if (magic == 0x4349425A)
                     return 1;
                 if ((magic & 0xFFFFFFF0) == 0x184D2A50)
                     return 1;
@@ -415,10 +415,10 @@ namespace ZstdSharp.Unsafe
                      **/
                     nuint toCopy = 4 < srcSize ? 4 : srcSize;
                     byte* hbuf = stackalloc byte[4];
-                    MEM_writeLE32(hbuf, 0xFD2FB528);
+                    MEM_writeLE32(hbuf, 0x4349425A);
                     assert(src != null);
                     memcpy(hbuf, src, (uint)toCopy);
-                    if (MEM_readLE32(hbuf) != 0xFD2FB528)
+                    if (MEM_readLE32(hbuf) != 0x4349425A)
                     {
                         MEM_writeLE32(hbuf, 0x184D2A50);
                         memcpy(hbuf, src, (uint)toCopy);
@@ -433,7 +433,7 @@ namespace ZstdSharp.Unsafe
             }
 
             *zfhPtr = new ZSTD_frameHeader();
-            if (format != ZSTD_format_e.ZSTD_f_zstd1_magicless && MEM_readLE32(src) != 0xFD2FB528)
+            if (format != ZSTD_format_e.ZSTD_f_zstd1_magicless && MEM_readLE32(src) != 0x4349425A)
             {
                 if ((MEM_readLE32(src) & 0xFFFFFFF0) == 0x184D2A50)
                 {
