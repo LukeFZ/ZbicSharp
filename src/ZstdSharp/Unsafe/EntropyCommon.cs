@@ -41,6 +41,8 @@ namespace ZstdSharp.Unsafe
                            void* headerBuffer, nuint hbSize)
         {    
             uint* bicCounter = stackalloc uint[257];
+            memset(bicCounter, 0, sizeof(uint) * 257);
+
             if (hbSize == 0) 
                 return unchecked((nuint)(-(int)ZSTD_ErrorCode.ZSTD_error_corruption_detected));
 
